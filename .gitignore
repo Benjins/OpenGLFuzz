@@ -1,0 +1,7 @@
+x64/
+.vs/
+
+OpenGLFuzz.vcxproj.user
+*.pdb
+*.dll
+*.lib
