@@ -34,11 +34,134 @@ GLenum ShaderTypeToGLenum(ShaderType Type) {
 	}
 }
 
+#define BYTECODE_OP_TYPE_NUM_BITS 6
+#define BYTECODE_OP_TYPE_MASK ((1 << BYTECODE_OP_TYPE_NUM_BITS) - 1)
 
-void DeserializeGLCmdsFromBytecode(std::vector<GLCmd>* OutCommands, uint32* BytecodePtr, int32 NumBytecodeOps) {
-	
+static_assert(GLCmd::UE_Count < (1 << BYTECODE_OP_TYPE_NUM_BITS), "Check that BYTECODE_OP_TYPE_NUM_BITS is big enough to hold GLCmd type enum");
+
+
+static const char* ShaderSourceTexts[] = {
+	"#version 330\nattribute vec4 pos; void main() { gl_Position = pos; }",
+	"#version 330\nattribute vec4 pos; attribute vec2 uvs; varying vec2 outUVs; void main() { outUVs = uvs; gl_Position = pos; }",
+	"#version 330\nvoid main() { gl_FragColor = vec4(0.2, 0.6, 0.5, 1.0); }",
+	"#version 330\nvarying vec2 uvs; uniform texture2D tex0; uniform texture2D tex1; void main() { gl_FragColor = vec4(0.2, 0.6, 0.5, 1.0); }",
+};
+
+static const char* ShaderUniformNames[] = {
+	"not_used",
+	"tex0",
+	"tex1",
+	"time",
+	"objMatrix",
+	"perspMatrix",
+};
+
+static const char* ShaderAttributeNames[] = {
+	"not_used",
+	"pos",
+	"uvs",
+	"color"
+};
+
+std::vector<float> DummyData[] = {
+	{ 1.0f, 0.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.5f, 0.0f, 0.5f, 0.5f, 1.0f, 1.0f, 0.5f, -0.5f, 1.0f },
+	{ 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },
+	{ 1.0f, 0.5f, 1.0f, 1.0f, 0.5f, 0.2f, -1.0f, 0.1f, 1.0f, 0.6f, 0.0f, -0.8f, 0.0f, 0.0f, 1.0f, -1.0f, 0.0f, 1.0f, 0.5f, 0.0f, 0.5f, 0.5f, 1.0f, 1.0f, 0.5f, -0.5f, 1.0f },
+};
+
+int32 RandomIntegerData[] = {
+	0, 1, 2, 3, 17, 9999, 65535, -1, -3, 255, 63, 64, 256
+};
+
+float RandomFloatData[] = {
+	0.0f, 1.0f, -1.0f, 0.5f, 0.01f, NAN, 2.3f, 111111.0f, 123e22f, -134.0f, 4.11324124f, INFINITY, -INFINITY, 123.0f, -1.32f, 45.0f, 1.234f, 452.0123f, 12312.0f
+};
+
+void* GetUniformDataForType(UniformType Type, int32 RandomIndex) {
+	if (Type == UniformType::Int) {
+		return &RandomIntegerData[RandomIndex % ARRAYSIZE(RandomIntegerData)];
+	}
+	else if (Type == UniformType::Float) {
+		return &RandomFloatData[RandomIndex % ARRAYSIZE(RandomFloatData)];
+	}
+	else if (Type == UniformType::Vec2) {
+		return &RandomFloatData[RandomIndex % (ARRAYSIZE(RandomFloatData) - 1)];
+	}
+	else if (Type == UniformType::Vec3) {
+		return &RandomFloatData[RandomIndex % (ARRAYSIZE(RandomFloatData) - 2)];
+	}
+	else if (Type == UniformType::Vec4) {
+		return &RandomFloatData[RandomIndex % (ARRAYSIZE(RandomFloatData) - 3)];
+	}
+	else if (Type == UniformType::Mat4) {
+		if (RandomIndex > 3) {
+			return &RandomFloatData[RandomIndex % (ARRAYSIZE(RandomFloatData) - 16)];
+		}
+		else {
+			return DummyData[RandomIndex % ARRAYSIZE(DummyData)].data();
+		}
+	}
+	else {
+		assert(false && "unreachable");
+	}
+
+	return nullptr;
 }
 
+
+void DeserializeGLCmdsFromBytecode(std::vector<GLCmd>* OutCommands, uint32* BytecodePtr, int32 NumBytecodeOps) {
+	OutCommands->clear();
+	OutCommands->reserve(NumBytecodeOps);
+
+	for (int32 i = 0; i < NumBytecodeOps; i++) {
+		uint32 BCOp = BytecodePtr[i];
+
+		uint32 BCType = (BCOp & BYTECODE_OP_TYPE_MASK) % (int32)GLCmd::UE_Count;
+		uint32 BCArgs = BCOp >> BYTECODE_OP_TYPE_NUM_BITS;
+
+		// TODO: Meh
+		auto SetUniformUniformType = (UniformType)(((BCArgs & 0xF0) >> 4) % (int32)UniformType::Count);
+
+#define PARSE_GL_CMD(Type, ...)  else if (BCType == GLCmd::UE_ ## Type) { OutCommands->emplace_back( Type ( __VA_ARGS__ )); }
+
+		// this is to start the else-if chain
+		if (false) { }
+		PARSE_GL_CMD(GLCmdMakeTexture, BCArgs & 0x0F)
+		PARSE_GL_CMD(GLCmdActiveTextureSlot, BCArgs & 0x0F)
+		PARSE_GL_CMD(GLCmdBindTexture, BCArgs & 0x0F)
+		PARSE_GL_CMD(GLCmdSetTextureMinFilter, (TexFilter)((BCArgs & 0x0F) % (int32)TexFilter::Count))
+		PARSE_GL_CMD(GLCmdSetTextureMagFilter, (TexFilter)((BCArgs & 0x0F) % (int32)TexFilter::Count))
+		PARSE_GL_CMD(GLCmdDestroyTexture, BCArgs & 0x0F)
+		PARSE_GL_CMD(GLCmdMakeShader, BCArgs & 0x0F, (BCArgs & 0x10) ? ShaderType::Vertex : ShaderType::Pixel)
+		PARSE_GL_CMD(GLCmdSetShaderSource, BCArgs & 0x0F, ShaderSourceTexts[((BCArgs & 0x03F0) >> 4) % ARRAYSIZE(ShaderSourceTexts)])
+		PARSE_GL_CMD(GLCmdCompileShader, BCArgs & 0x0F)
+		PARSE_GL_CMD(GLCmdDestroyShader, BCArgs & 0x0F)
+		PARSE_GL_CMD(GLCmdMakeProgram, BCArgs & 0x0F)
+		PARSE_GL_CMD(GLCmdAttachShader, BCArgs & 0x0F, (BCArgs & 0xF0) >> 4)
+		PARSE_GL_CMD(GLCmdLinkProgram, BCArgs & 0x0F)
+		PARSE_GL_CMD(GLCmdValidateProgram, BCArgs & 0x0F)
+		PARSE_GL_CMD(GLCmdUseProgram, BCArgs & 0x0F)
+		PARSE_GL_CMD(GLCmdDestroyProgram, BCArgs & 0x0F)
+		PARSE_GL_CMD(GLCmdMakeBuffer, BCArgs & 0x0F)
+		PARSE_GL_CMD(GLCmdBindBuffer, BCArgs & 0x0F)
+		// TODO: Different data? does it not matter?
+		PARSE_GL_CMD(GLCmdBufferData, (int32)(DummyData[0].size() * sizeof(float)), (void*)DummyData[0].data(), (BCArgs & 0x01) != 0)
+		PARSE_GL_CMD(GLCmdDestroyBuffer, BCArgs & 0x0F)
+		PARSE_GL_CMD(GLCmdGetUniformLocation, BCArgs & 0x0F, (BCArgs & 0xF0) >> 4, ShaderUniformNames[((BCArgs & 0x0F00) >> 8) % ARRAYSIZE(ShaderUniformNames)])
+		PARSE_GL_CMD(GLCmdSetUniform, BCArgs & 0x0F, SetUniformUniformType, GetUniformDataForType(SetUniformUniformType, (BCArgs & 0x0F00) >> 8))
+		PARSE_GL_CMD(GLCmdGetVertexAttribLocation, BCArgs & 0x0F, (BCArgs & 0xF0) >> 4, ShaderAttributeNames[((BCArgs & 0x0F00) >> 8) % ARRAYSIZE(ShaderAttributeNames)])
+		PARSE_GL_CMD(GLCmdEnableVertexAttrib, BCArgs & 0x0F)
+		PARSE_GL_CMD(GLCmdDisableVertexAttrib, BCArgs & 0x0F)
+		PARSE_GL_CMD(GLCmdVertexAttribPointer, BCArgs & 0x0F, 2 + (((BCArgs & 0x30) >> 4) % 3))
+		PARSE_GL_CMD(GLCmdDrawArrays, BCArgs & 0x3F)
+		
+		else {
+			assert(false && "unreachable");
+		}
+
+#undef PARSE_GL_CMD
+	}
+}
 
 void ExecuteGLCmds(GLCtxState* Ctx, const std::vector<GLCmd>& Commands) {
 	for (const auto& Cmd : Commands) {
